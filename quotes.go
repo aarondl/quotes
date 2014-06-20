@@ -2,9 +2,10 @@ package quotes
 
 import (
 	"database/sql"
-	_ "github.com/mattn/go-sqlite3"
 	"sync"
 	"time"
+
+	_ "github.com/mattn/go-sqlite3"
 )
 
 const (
@@ -82,11 +83,20 @@ func (q *QuoteDB) Close() error {
 }
 
 // AddQuote adds a quote to the database.
-func (q *QuoteDB) AddQuote(author, quote string) (err error) {
+func (q *QuoteDB) AddQuote(author, quote string) (id int64, err error) {
 	q.Lock()
 	defer q.Unlock()
 
-	_, err = q.db.Exec(sqlAdd, time.Now().Unix(), author, quote)
+	var res sql.Result
+	res, err = q.db.Exec(sqlAdd, time.Now().Unix(), author, quote)
+	if err != nil {
+		return
+	}
+
+	if id, err = res.LastInsertId(); err != nil {
+		id = 0
+	}
+
 	q.nQuotes++
 	return
 }
