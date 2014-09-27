@@ -22,6 +22,7 @@ const (
 	sqlGet       = `SELECT id, quote FROM quotes ORDER BY RANDOM() LIMIT 1;`
 	sqlGetId     = `SELECT quote FROM quotes WHERE id = ?;`
 	sqlGetDetail = `SELECT date, author FROM quotes WHERE id = ?;`
+	sqlGetAll    = `SELECT id, date, author, quote FROM quotes order by id desc;`
 )
 
 // QuoteDB provides file storage of quotes via an sqlite database.
@@ -29,6 +30,14 @@ type QuoteDB struct {
 	db      *sql.DB
 	nQuotes int
 	sync.RWMutex
+}
+
+// Quote is for serializing to and from the sqlite database.
+type Quote struct {
+	ID     int
+	Date   time.Time
+	Author string
+	Quote  string
 }
 
 // OpenDB opens the database at the location requested.
@@ -151,4 +160,33 @@ func (q *QuoteDB) EditQuote(id int, quote string) (bool, error) {
 		return false, err
 	}
 	return r == 1, nil
+}
+
+func (qdb *QuoteDB) GetAll() ([]Quote, error) {
+	var err error
+
+	rows, err := qdb.db.Query(sqlGetAll)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	quotes := make([]Quote, 0)
+	q := Quote{}
+	for rows.Next() {
+		var date int64
+		if err = rows.Scan(&q.ID, &date, &q.Author, &q.Quote); err != nil {
+			return nil, err
+		}
+
+		q.Date = time.Unix(date, 0).UTC()
+
+		quotes = append(quotes, q)
+	}
+
+	if err = rows.Err(); err != nil {
+		return nil, err
+	}
+
+	return quotes, nil
 }
