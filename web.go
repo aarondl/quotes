@@ -89,6 +89,10 @@ const index = `<!DOCTYPE html>
       border-bottom: solid 1px rgba(0,0,0,0.1);
     }
 
+    table tbody tr:nth-child(2) td {
+      background-color: rgba(0,0,0,0.35);
+    }
+
     table tbody tr:hover {
       background-color: rgba(255,255,255,0.1);
     }
