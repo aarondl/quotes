@@ -1,7 +1,9 @@
 package quotes
 
 import (
+	"bytes"
 	"html/template"
+	"io"
 	"log"
 	"net/http"
 	"time"
@@ -38,11 +40,14 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 		quotes,
 	}
 
-	if err = tmpl.Execute(w, data); err != nil {
+	buf := &bytes.Buffer{}
+	if err = tmpl.Execute(buf, data); err != nil {
 		w.WriteHeader(500)
 		log.Println("Failed to execute template:", err)
 		return
 	}
+
+	_, _ = io.Copy(w, buf)
 }
 
 const index = `<!DOCTYPE html>
