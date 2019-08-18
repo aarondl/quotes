@@ -2,17 +2,34 @@ package quotes
 
 import (
 	"bytes"
+	"fmt"
 	"html/template"
 	"io"
 	"log"
 	"net/http"
+	"regexp"
 	"time"
 )
 
+var rgxSplitQuote = regexp.MustCompile(`<[^>]+>[^<]+`)
+
+func splitEm(q string) []string {
+	matches := rgxSplitQuote.FindAllString(q, -1)
+	if matches != nil {
+		return matches
+	}
+
+	return []string{q}
+}
+
 var tmpl = template.Must(template.New("quotes").Funcs(template.FuncMap{
 	"fmtDate": func(date time.Time) string {
-		return date.Format("2006-02-01 15:04:05")
+		return date.Format("2006-01-02 15:04:05")
 	},
+	"sub": func(a, b int) string {
+		return fmt.Sprint(a - b)
+	},
+	"splitEm": splitEm,
 }).Parse(index))
 
 // StartServer starts a webserver to listen on.
@@ -25,9 +42,19 @@ func (q *QuoteDB) StartServer(address string) {
 }
 
 func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
-	quotes, err := q.GetAll()
+	if r.URL.Path != "/" {
+		w.WriteHeader(http.StatusNotFound)
+		return
+	}
+
+	showAll := false
+	if r.URL.Query().Get("all") == "true" {
+		showAll = true
+	}
+
+	quotes, err := q.GetAll(!showAll)
 	if err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		log.Println("Failed to get all the quotes:", err)
 		return
 	}
@@ -57,11 +84,20 @@ const index = `<!DOCTYPE html>
     <link href="https://fonts.googleapis.com/css?family=Lato" rel="stylesheet" type="text/css">
     <style>
     body, html {
-      font-size:62.5%;
+      font-size: 62.5%;
       margin-top: 50px;
       font-family: 'Lato', sans-serif;
-      color: #BEE9C8;
-      background-color: #081710;
+      color: #AAAFB6;
+      background-color: #5F6B7B;
+    }
+
+    a {
+      color: #294977;
+      text-decoration: none;
+    }
+
+    a:hover {
+      text-decoration: underline;
     }
 
     .container {
@@ -95,7 +131,7 @@ const index = `<!DOCTYPE html>
     }
 
     table tbody tr:nth-child(2n) td {
-      background-color: rgba(0,0,0,0.35);
+      background-color: rgba(0,0,0,0.05);
     }
 
     table tbody tr:hover {
@@ -127,6 +163,21 @@ const index = `<!DOCTYPE html>
       max-width: 140px;
     }
 
+    table .votes {
+      width: 50px;
+      max-width: 60px;
+    }
+
+    table .upvotes {
+      width: 50px;
+      max-width: 60px;
+    }
+
+    table .downvotes {
+      width: 50px;
+      max-width: 60px;
+    }
+
     .footer {
       margin-top: 20px;
       text-align: center;
@@ -136,24 +187,30 @@ const index = `<!DOCTYPE html>
   <body>
     {{if .Quotes}}
     <div class="container">
-      <h1>Quotes</h1>
+      <h1>Quotes (<a href="/?all=true">show all</a>)</h1>
       <div class="quotes">
         <table>
           <thead>
             <tr>
               <td class="id">ID</td>
+              <td class="votes">Votes</td>
               <td class="quote">Quote</td>
               <td class="author">Author</td>
               <td class="date">Date</td>
+              <td class="upvotes">Up</td>
+              <td class="downvotes">Down</td>
             </tr>
           </thead>
           <tbody>
             {{range .Quotes}}
             <tr>
               <td class="id">{{.ID}}</td>
-              <td class="quote">{{.Quote}}</td>
+              <td class="votes">{{sub .Upvotes .Downvotes}}</td>
+              <td class="quote">{{range $i, $q := .Quote | splitEm}}{{if not (eq 0 $i)}}<br>{{end}}{{$q}}{{end}}</td>
               <td class="author">{{.Author}}</td>
               <td class="date">{{fmtDate .Date}}</td>
+              <td class="upvotes">{{.Upvotes}}</td>
+              <td class="downvotes">{{.Downvotes}}</td>
             </tr>
 			{{end}}
           </tbody>
@@ -165,7 +222,7 @@ const index = `<!DOCTYPE html>
       </div>
       {{end}}
       {{else}}
-        <center><span>There are no quotes yet.</center></span>
+        <center><span style="font-size: 2rem;">There are no quotes yet (<a href="/?all=true">show all</a>).</center></span>
       {{end}}
     </div>
   </body>

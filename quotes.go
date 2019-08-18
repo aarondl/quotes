@@ -1,11 +1,21 @@
 package quotes
 
 import (
+	"context"
 	"database/sql"
+	"fmt"
 	"sync"
 	"time"
 
+	// sqlite3
 	_ "github.com/mattn/go-sqlite3"
+)
+
+// Thresholds, it's in two different ones to avoid
+// having to define as var and use sprintf
+const (
+	quoteThreshold    = -2
+	quoteThresholdStr = "-2"
 )
 
 const (
@@ -14,15 +24,55 @@ const (
 		`date INTEGER NOT NULL,` +
 		`author TEXT NOT NULL,` +
 		`quote TEXT NOT NULL);`
-	sqlDateIndex = `CREATE INDEX IF NOT EXISTS quotesdate ON quotes (date);`
-	sqlGetCount  = `SELECT COUNT(*) FROM quotes;`
-	sqlAdd       = `INSERT INTO quotes (date, author, quote) VALUES(?, ?, ?);`
-	sqlDel       = `DELETE FROM quotes WHERE id = ?;`
-	sqlEdit      = `UPDATE quotes SET quote = ? WHERE id = ?;`
-	sqlGet       = `SELECT id, quote FROM quotes ORDER BY RANDOM() LIMIT 1;`
-	sqlGetId     = `SELECT quote FROM quotes WHERE id = ?;`
-	sqlGetDetail = `SELECT date, author FROM quotes WHERE id = ?;`
-	sqlGetAll    = `SELECT id, date, author, quote FROM quotes order by id desc;`
+	sqlCreateVotesTable = `CREATE TABLE IF NOT EXISTS votes (` +
+		`quote_id INTEGER NOT NULL,` +
+		`voter TEXT NOT NULL,` +
+		`vote INTEGER NOT NULL,` +
+		`date INTEGER NOT NULL,` +
+		`PRIMARY KEY (quote_id, voter),` +
+		`FOREIGN KEY (quote_id) REFERENCES quotes (id))`
+	sqlDateIndex        = `CREATE INDEX IF NOT EXISTS quotesdate ON quotes (date);`
+	sqlVoteQuoteIDIndex = `CREATE INDEX IF NOT EXISTS quotesid ON votes (quote_id);`
+	sqlVoteVoteIndex    = `CREATE INDEX IF NOT EXISTS votesvote ON votes (vote);`
+
+	sqlGetCount = `SELECT COUNT(*) FROM quotes;`
+	sqlAdd      = `INSERT INTO quotes (date, author, quote) VALUES(?, ?, ?);`
+	sqlDel      = `DELETE FROM quotes WHERE id = ?;`
+	sqlEdit     = `UPDATE quotes SET quote = ? WHERE id = ?;`
+
+	sqlGetByID = `SELECT id, date, author, quote, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = 1) AS upvotes, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = -1) AS downvotes ` +
+		`FROM quotes ` +
+		`WHERE id = ?;`
+	sqlGetRandom = `SELECT id, date, author, quote, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = 1) AS upvotes, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = -1) AS downvotes ` +
+		`FROM quotes ` +
+		`WHERE (upvotes - downvotes) > ` + quoteThresholdStr + ` ` +
+		`ORDER BY RANDOM() LIMIT 1;`
+	sqlGetAll = `SELECT q.id, q.date, q.author, q.quote, ` +
+		`COUNT(ups.quote_id) AS upvotes, COUNT(downs.quote_id) as downvotes ` +
+		`FROM quotes as q ` +
+		`LEFT JOIN votes as ups on (q.id = ups.quote_id AND ups.vote = 1) ` +
+		`LEFT JOIN votes as downs on (q.id = downs.quote_id AND downs.vote = -1) ` +
+		`GROUP BY q.id, q.date, q.author, q.quote ` +
+		`ORDER BY q.id desc;`
+	sqlGetAllFiltered = `SELECT q.id, q.date, q.author, q.quote, ` +
+		`COUNT(ups.quote_id) AS upvotes, COUNT(downs.quote_id) as downvotes ` +
+		`FROM quotes as q ` +
+		`LEFT JOIN votes as ups on (q.id = ups.quote_id AND ups.vote = 1) ` +
+		`LEFT JOIN votes as downs on (q.id = downs.quote_id AND downs.vote = -1) ` +
+		`GROUP BY q.id, q.date, q.author, q.quote ` +
+		`HAVING (upvotes-downvotes) > ` + quoteThresholdStr + ` ` +
+		`ORDER BY q.id desc;`
+
+	sqlHasVote      = `SELECT vote FROM VOTES WHERE quote_id = ? AND voter = ? LIMIT 1;`
+	sqlUpvote       = `INSERT INTO votes (quote_id, voter, vote, date) VALUES (?, ?, 1, ?);`
+	sqlDownvote     = `INSERT INTO votes (quote_id, voter, vote, date) VALUES (?, ?, -1, ?);`
+	sqlUnvote       = `DELETE FROM VOTES WHERE quote_id = ? AND voter = ?;`
+	sqlGetUpvotes   = `SELECT COUNT(*) FROM votes WHERE quote_id = ? AND vote = 1;`
+	sqlGetDownvotes = `SELECT COUNT(*) FROM votes WHERE quote_id = ? AND vote = -1;`
 )
 
 // QuoteDB provides file storage of quotes via an sqlite database.
@@ -38,6 +88,9 @@ type Quote struct {
 	Date   time.Time
 	Author string
 	Quote  string
+
+	Upvotes   int
+	Downvotes int
 }
 
 // OpenDB opens the database at the location requested.
@@ -71,12 +124,22 @@ func (q *QuoteDB) NQuotes() int {
 
 // createTableIfNotExists creates the quotes table if necessary.
 func (q *QuoteDB) createTable() (err error) {
-	_, err = q.db.Exec(sqlCreateTable)
-	if err != nil {
-		return
+	var commands = []string{
+		sqlCreateTable,
+		sqlCreateVotesTable,
+		sqlDateIndex,
+		sqlVoteQuoteIDIndex,
+		sqlVoteVoteIndex,
 	}
-	_, err = q.db.Exec(sqlDateIndex)
-	return
+
+	for _, c := range commands {
+		_, err = q.db.Exec(c)
+		if err != nil {
+			return fmt.Errorf("error running sql statement:\nsql: %s\nerror: %v", c, err)
+		}
+	}
+
+	return nil
 }
 
 // getCount refreshes the number of quotes.
@@ -111,21 +174,41 @@ func (q *QuoteDB) AddQuote(author, quote string) (id int64, err error) {
 }
 
 // RandomQuote gets a random existing quote.
-func (q *QuoteDB) RandomQuote() (id int, quote string, err error) {
-	err = q.db.QueryRow(sqlGet).Scan(&id, &quote)
-	return
+func (q *QuoteDB) RandomQuote() (quote Quote, err error) {
+	var date int64
+	err = q.db.QueryRow(sqlGetRandom).Scan(
+		&quote.ID,
+		&date,
+		&quote.Author,
+		&quote.Quote,
+		&quote.Upvotes,
+		&quote.Downvotes)
+	if err != nil {
+		return quote, err
+	}
+
+	quote.Date = time.Unix(date, 0).UTC()
+
+	return quote, err
 }
 
 // GetQuote gets a specific quote by id.
-func (q *QuoteDB) GetQuote(id int) (quote string, err error) {
-	err = q.db.QueryRow(sqlGetId, id).Scan(&quote)
-	return
-}
+func (q *QuoteDB) GetQuote(id int) (quote Quote, err error) {
+	var date int64
+	err = q.db.QueryRow(sqlGetByID, id).Scan(
+		&quote.ID,
+		&date,
+		&quote.Author,
+		&quote.Quote,
+		&quote.Upvotes,
+		&quote.Downvotes)
+	if err != nil {
+		return quote, err
+	}
 
-// GetDetails gets metadata about the quote.
-func (q *QuoteDB) GetDetails(id int) (date int64, author string, err error) {
-	err = q.db.QueryRow(sqlGetDetail, id).Scan(&date, &author)
-	return
+	quote.Date = time.Unix(date, 0).UTC()
+
+	return quote, nil
 }
 
 // DelQuote deletes a quote by id.
@@ -162,26 +245,31 @@ func (q *QuoteDB) EditQuote(id int, quote string) (bool, error) {
 	return r == 1, nil
 }
 
-func (qdb *QuoteDB) GetAll() ([]Quote, error) {
+// GetAll quotes
+func (q *QuoteDB) GetAll(filterLow bool) ([]Quote, error) {
 	var err error
 
-	rows, err := qdb.db.Query(sqlGetAll)
+	query := sqlGetAll
+	if filterLow {
+		query = sqlGetAllFiltered
+	}
+	rows, err := q.db.Query(query)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
 	quotes := make([]Quote, 0)
-	q := Quote{}
+	quote := Quote{}
 	for rows.Next() {
 		var date int64
-		if err = rows.Scan(&q.ID, &date, &q.Author, &q.Quote); err != nil {
+		if err = rows.Scan(&quote.ID, &date, &quote.Author, &quote.Quote, &quote.Upvotes, &quote.Downvotes); err != nil {
 			return nil, err
 		}
 
-		q.Date = time.Unix(date, 0).UTC()
+		quote.Date = time.Unix(date, 0).UTC()
 
-		quotes = append(quotes, q)
+		quotes = append(quotes, quote)
 	}
 
 	if err = rows.Err(); err != nil {
@@ -189,4 +277,132 @@ func (qdb *QuoteDB) GetAll() ([]Quote, error) {
 	}
 
 	return quotes, nil
+}
+
+// Upvote returns true iff the upvote was applied, if it was not applied
+// it's because the user already has a vote for that quote
+func (q *QuoteDB) Upvote(id int, voter string) (bool, error) {
+	tx, err := q.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return false, err
+	}
+
+	// If we have a +1 already, return false, nil
+	// If we have a -1, delete it, and add the +1
+	// If we have nothing, add the +1
+
+	var vote int
+	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
+	if err != nil && err != sql.ErrNoRows {
+		_ = tx.Rollback()
+		return false, nil
+	}
+
+	switch {
+	case vote > 0:
+		// Return false, we've already got the same type of vote here
+		_ = tx.Rollback()
+		return false, nil
+	case vote < 0:
+		// Delete old downvote
+		if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+	}
+
+	if _, err = tx.Exec(sqlUpvote, id, voter, time.Now().Unix()); err != nil {
+		return false, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// Downvote returns true iff the upvote was applied, if it was not applied
+// it's because the user already has a vote for that quote
+func (q *QuoteDB) Downvote(id int, voter string) (bool, error) {
+	tx, err := q.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return false, err
+	}
+
+	// If we have a -1 already, return false, nil
+	// If we have a +1, delete it, and add the -1
+	// If we have nothing, add the -1
+
+	var vote int
+	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
+	if err != nil && err != sql.ErrNoRows {
+		_ = tx.Rollback()
+		return false, nil
+	}
+
+	switch {
+	case vote < 0:
+		// Return false, we've already got the same type of vote here
+		_ = tx.Rollback()
+		return false, nil
+	case vote > 0:
+		// Delete old upvote
+		if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+	}
+
+	if _, err = tx.Exec(sqlDownvote, id, voter, time.Now().Unix()); err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// Unvote returns true iff there was a vote that was removed, otherwise it
+// return false.
+func (q *QuoteDB) Unvote(id int, voter string) (bool, error) {
+	tx, err := q.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return false, err
+	}
+
+	var throwaway int
+	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&throwaway)
+	if err == sql.ErrNoRows {
+		_ = tx.Rollback()
+		return false, nil
+	} else if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+		return false, err
+	}
+
+	if err = tx.Commit(); err != nil {
+		return false, err
+	}
+
+	return true, nil
+}
+
+// Votes retrieves the vote counts for a quote
+func (q *QuoteDB) Votes(id int) (up, down int, err error) {
+	if err = q.db.QueryRow(sqlGetUpvotes, id).Scan(&up); err != nil {
+		return 0, 0, err
+	}
+	if err = q.db.QueryRow(sqlGetUpvotes, id).Scan(&down); err != nil {
+		return 0, 0, err
+	}
+
+	return up, down, nil
 }
