@@ -3,7 +3,9 @@ package quotes
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
+	"net/url"
 	"sync"
 	"time"
 
@@ -40,7 +42,8 @@ const (
 	sqlDel      = `DELETE FROM quotes WHERE id = ?;`
 	sqlEdit     = `UPDATE quotes SET quote = ? WHERE id = ?;`
 
-	sqlGetByID = `SELECT id, date, author, quote, ` +
+	sqlHasQuote = `SELECT EXISTS(SELECT id FROM quotes WHERE id = ?);`
+	sqlGetByID  = `SELECT id, date, author, quote, ` +
 		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = 1) AS upvotes, ` +
 		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = -1) AS downvotes ` +
 		`FROM quotes ` +
@@ -95,7 +98,10 @@ type Quote struct {
 
 // OpenDB opens the database at the location requested.
 func OpenDB(filename string) (*QuoteDB, error) {
-	db, err := sql.Open("sqlite3", filename)
+	opts := make(url.Values)
+	opts.Set("_foreign_keys", "1")
+
+	db, err := sql.Open("sqlite3", filename+`?`+opts.Encode())
 	if err != nil {
 		return nil, err
 	}
@@ -290,6 +296,17 @@ func (q *QuoteDB) Upvote(id int, voter string) (bool, error) {
 	// If we have a +1 already, return false, nil
 	// If we have a -1, delete it, and add the +1
 	// If we have nothing, add the +1
+	var quoteExists int
+	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if quoteExists == 0 {
+		_ = tx.Rollback()
+		return false, errors.New("Not a valid id")
+	}
 
 	var vote int
 	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
@@ -333,6 +350,17 @@ func (q *QuoteDB) Downvote(id int, voter string) (bool, error) {
 	// If we have a -1 already, return false, nil
 	// If we have a +1, delete it, and add the -1
 	// If we have nothing, add the -1
+	var quoteExists int
+	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if quoteExists == 0 {
+		_ = tx.Rollback()
+		return false, errors.New("Not a valid id")
+	}
 
 	var vote int
 	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
@@ -372,6 +400,18 @@ func (q *QuoteDB) Unvote(id int, voter string) (bool, error) {
 	tx, err := q.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: false})
 	if err != nil {
 		return false, err
+	}
+
+	var quoteExists int
+	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+	if err != nil {
+		_ = tx.Rollback()
+		return false, err
+	}
+
+	if quoteExists == 0 {
+		_ = tx.Rollback()
+		return false, errors.New("Not a valid id")
 	}
 
 	var throwaway int
