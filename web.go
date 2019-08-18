@@ -77,7 +77,7 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 		AllHref      template.HTMLAttr
 		VotesortHref template.HTMLAttr
 	}{
-		NQuotes:      q.NQuotes(),
+		NQuotes:      len(quotes),
 		Quotes:       quotes,
 		AllHref:      template.HTMLAttr(fmt.Sprintf(`href="/?%s"`, allQuery.Encode())),
 		VotesortHref: template.HTMLAttr(fmt.Sprintf(`href="/?%s"`, votesortQuery.Encode())),
@@ -90,13 +90,13 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 			ivotes := iquote.Upvotes - iquote.Downvotes
 			jvotes := jquote.Upvotes - jquote.Downvotes
 
-			return ivotes > jvotes || iquote.ID > jquote.ID
+			return ivotes > jvotes || (ivotes == jvotes && iquote.ID > jquote.ID)
 		})
 	}
 
 	buf := &bytes.Buffer{}
 	if err = tmpl.Execute(buf, data); err != nil {
-		w.WriteHeader(500)
+		w.WriteHeader(http.StatusInternalServerError)
 		log.Println("Failed to execute template:", err)
 		return
 	}
