@@ -7,7 +7,9 @@ import (
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"regexp"
+	"sort"
 	"time"
 )
 
@@ -48,8 +50,13 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	showAll := false
-	if r.URL.Query().Get("all") == "true" {
+	voteSort := false
+	query := r.URL.Query()
+	if query.Get("all") == "true" {
 		showAll = true
+	}
+	if query.Get("votesort") == "true" {
+		voteSort = true
 	}
 
 	quotes, err := q.GetAll(!showAll)
@@ -59,12 +66,32 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	allQuery := cloneQuery(query)
+	allQuery.Set("all", "true")
+	votesortQuery := cloneQuery(query)
+	votesortQuery.Set("votesort", "true")
+
 	data := struct {
-		NQuotes int
-		Quotes  []Quote
+		NQuotes      int
+		Quotes       []Quote
+		AllHref      template.HTMLAttr
+		VotesortHref template.HTMLAttr
 	}{
-		q.NQuotes(),
-		quotes,
+		NQuotes:      q.NQuotes(),
+		Quotes:       quotes,
+		AllHref:      template.HTMLAttr(fmt.Sprintf(`href="/?%s"`, allQuery.Encode())),
+		VotesortHref: template.HTMLAttr(fmt.Sprintf(`href="/?%s"`, votesortQuery.Encode())),
+	}
+
+	if voteSort {
+		sort.Slice(data.Quotes, func(i, j int) bool {
+			iquote := data.Quotes[i]
+			jquote := data.Quotes[j]
+			ivotes := iquote.Upvotes - iquote.Downvotes
+			jvotes := jquote.Upvotes - jquote.Downvotes
+
+			return ivotes > jvotes || iquote.ID > jquote.ID
+		})
 	}
 
 	buf := &bytes.Buffer{}
@@ -75,6 +102,17 @@ func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	_, _ = io.Copy(w, buf)
+}
+
+func cloneQuery(vals url.Values) url.Values {
+	clone := make(url.Values)
+	for k, v := range vals {
+		vals := make([]string, len(v))
+		copy(vals, v)
+		clone[k] = v
+	}
+
+	return clone
 }
 
 const index = `<!DOCTYPE html>
@@ -187,7 +225,7 @@ const index = `<!DOCTYPE html>
   <body>
     {{if .Quotes}}
     <div class="container">
-      <h1>Quotes (<a href="/?all=true">show all</a>)</h1>
+      <h1>Quotes (<a {{.AllHref}}>show all</a>) (<a {{.VotesortHref}}>votesort</a>)</h1>
       <div class="quotes">
         <table>
           <thead>
@@ -222,7 +260,7 @@ const index = `<!DOCTYPE html>
       </div>
       {{end}}
       {{else}}
-        <center><span style="font-size: 2rem;">There are no quotes yet (<a href="/?all=true">show all</a>).</center></span>
+        <center><span style="font-size: 2rem;">There are no quotes yet (<a {{.AllHref}}>show all</a>).</center></span>
       {{end}}
     </div>
   </body>

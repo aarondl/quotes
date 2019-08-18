@@ -55,19 +55,15 @@ const (
 		`WHERE (upvotes - downvotes) > ` + quoteThresholdStr + ` ` +
 		`ORDER BY RANDOM() LIMIT 1;`
 	sqlGetAll = `SELECT q.id, q.date, q.author, q.quote, ` +
-		`COUNT(ups.quote_id) AS upvotes, COUNT(downs.quote_id) as downvotes ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = 1) AS upvotes, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = -1) AS downvotes ` +
 		`FROM quotes as q ` +
-		`LEFT JOIN votes as ups on (q.id = ups.quote_id AND ups.vote = 1) ` +
-		`LEFT JOIN votes as downs on (q.id = downs.quote_id AND downs.vote = -1) ` +
-		`GROUP BY q.id, q.date, q.author, q.quote ` +
 		`ORDER BY q.id desc;`
 	sqlGetAllFiltered = `SELECT q.id, q.date, q.author, q.quote, ` +
-		`COUNT(ups.quote_id) AS upvotes, COUNT(downs.quote_id) as downvotes ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = 1) AS upvotes, ` +
+		`(SELECT COUNT(*) FROM votes WHERE quote_id = id AND vote = -1) AS downvotes ` +
 		`FROM quotes as q ` +
-		`LEFT JOIN votes as ups on (q.id = ups.quote_id AND ups.vote = 1) ` +
-		`LEFT JOIN votes as downs on (q.id = downs.quote_id AND downs.vote = -1) ` +
-		`GROUP BY q.id, q.date, q.author, q.quote ` +
-		`HAVING (upvotes-downvotes) > ` + quoteThresholdStr + ` ` +
+		`WHERE (upvotes - downvotes) > ` + quoteThresholdStr + ` ` +
 		`ORDER BY q.id desc;`
 
 	sqlHasVote      = `SELECT vote FROM VOTES WHERE quote_id = ? AND voter = ? LIMIT 1;`
