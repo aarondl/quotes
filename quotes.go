@@ -6,11 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"strings"
 	"sync"
 	"time"
 
 	// sqlite3
 	_ "github.com/mattn/go-sqlite3"
+	"golang.org/x/crypto/bcrypt"
 )
 
 // Thresholds, it's in two different ones to avoid
@@ -76,9 +78,14 @@ const (
 
 // QuoteDB provides file storage of quotes via an sqlite database.
 type QuoteDB struct {
-	db      *sql.DB
-	nQuotes int
+	db *sql.DB
+
+	webuser string
+	webpass string
+	webhash []byte
+
 	sync.RWMutex
+	nQuotes int
 }
 
 // Quote is for serializing to and from the sqlite database.
@@ -93,16 +100,38 @@ type Quote struct {
 }
 
 // OpenDB opens the database at the location requested.
-func OpenDB(filename string) (*QuoteDB, error) {
+func OpenDB(filename, webAuth string) (*QuoteDB, error) {
 	opts := make(url.Values)
 	opts.Set("_foreign_keys", "1")
+
+	var user, pass string
+	var hash []byte
+	if len(webAuth) != 0 {
+		splits := strings.SplitN(webAuth, "@", 2)
+		if len(splits) == 2 {
+			user = splits[0]
+			pass = splits[1]
+
+			var err error
+			hash, err = bcrypt.GenerateFromPassword([]byte(pass), bcrypt.DefaultCost)
+			if err != nil {
+				return nil, fmt.Errorf("failed to bcrypt web password: %w", err)
+			}
+		}
+	}
 
 	db, err := sql.Open("sqlite3", filename+`?`+opts.Encode())
 	if err != nil {
 		return nil, err
 	}
 
-	qdb := &QuoteDB{db: db}
+	qdb := &QuoteDB{
+		db:      db,
+		webuser: user,
+		webpass: pass,
+		webhash: hash,
+	}
+
 	err = qdb.createTable()
 	if err != nil {
 		defer qdb.Close()

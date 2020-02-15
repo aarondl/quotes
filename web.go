@@ -11,6 +11,8 @@ import (
 	"regexp"
 	"sort"
 	"time"
+
+	"golang.org/x/crypto/bcrypt"
 )
 
 var rgxSplitQuote = regexp.MustCompile(`<[^>]+>[^<]+`)
@@ -44,6 +46,15 @@ func (q *QuoteDB) StartServer(address string) {
 }
 
 func (q *QuoteDB) quotesRoot(w http.ResponseWriter, r *http.Request) {
+	if len(q.webuser) != 0 || len(q.webhash) != 0 {
+		user, pwd, ok := r.BasicAuth()
+		if !ok || q.webuser != user || nil != bcrypt.CompareHashAndPassword(q.webhash, []byte(pwd)) {
+			w.Header().Set("WWW-Authenticate", "Basic realm=Quotes")
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+	}
+
 	if r.URL.Path != "/" {
 		w.WriteHeader(http.StatusNotFound)
 		return
