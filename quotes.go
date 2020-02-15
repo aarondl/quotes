@@ -107,7 +107,7 @@ func OpenDB(filename, webAuth string) (*QuoteDB, error) {
 	var user, pass string
 	var hash []byte
 	if len(webAuth) != 0 {
-		splits := strings.SplitN(webAuth, "@", 2)
+		splits := strings.SplitN(webAuth, ":", 2)
 		if len(splits) == 2 {
 			user = splits[0]
 			pass = splits[1]
