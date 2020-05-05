@@ -288,14 +288,16 @@ func (q *QuoteDB) GetAll(filterLow bool) ([]Quote, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 
 	quotes := make([]Quote, 0)
 	quote := Quote{}
 	for rows.Next() {
 		var date int64
 		if err = rows.Scan(&quote.ID, &date, &quote.Author, &quote.Quote, &quote.Upvotes, &quote.Downvotes); err != nil {
-			return nil, err
+			if cerr := rows.Close(); cerr != nil {
+				return nil, fmt.Errorf("failed to scan quotes (%w) but also close quotes: %v", err, cerr)
+			}
+			return nil, fmt.Errorf("failed to scan quotes: %w", err)
 		}
 
 		quote.Date = time.Unix(date, 0).UTC()
@@ -303,8 +305,12 @@ func (q *QuoteDB) GetAll(filterLow bool) ([]Quote, error) {
 		quotes = append(quotes, quote)
 	}
 
+	if err = rows.Close(); err != nil {
+		return nil, fmt.Errorf("error closing rows in getall: %w", err)
+	}
+
 	if err = rows.Err(); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("error reading all rows: %w", err)
 	}
 
 	return quotes, nil
@@ -318,50 +324,59 @@ func (q *QuoteDB) Upvote(id int, voter string) (bool, error) {
 		return false, err
 	}
 
-	// If we have a +1 already, return false, nil
-	// If we have a -1, delete it, and add the +1
-	// If we have nothing, add the +1
-	var quoteExists int
-	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, err
-	}
-
-	if quoteExists == 0 {
-		_ = tx.Rollback()
-		return false, errors.New("Not a valid id")
-	}
-
-	var vote int
-	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
-	if err != nil && err != sql.ErrNoRows {
-		_ = tx.Rollback()
-		return false, nil
-	}
-
-	switch {
-	case vote > 0:
-		// Return false, we've already got the same type of vote here
-		_ = tx.Rollback()
-		return false, nil
-	case vote < 0:
-		// Delete old downvote
-		if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
-			_ = tx.Rollback()
-			return false, err
+	alreadyVoted := false
+	runTx := func() error {
+		// If we have a +1 already, return false, nil
+		// If we have a -1, delete it, and add the +1
+		// If we have nothing, add the +1
+		var quoteExists int
+		err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+		if err != nil {
+			return err
 		}
+
+		if quoteExists == 0 {
+			return errors.New("Not a valid id")
+		}
+
+		var vote int
+		err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+
+		switch {
+		case vote > 0:
+			// Return false, we've already got the same type of vote here
+			alreadyVoted = true
+			return nil
+		case vote < 0:
+			// Delete old downvote
+			if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+				return fmt.Errorf("failed to delete old downvote: %w", err)
+			}
+		}
+
+		if _, err = tx.Exec(sqlUpvote, id, voter, time.Now().Unix()); err != nil {
+			return fmt.Errorf("failed to execute upvote: %w", err)
+		}
+
+		return nil
 	}
 
-	if _, err = tx.Exec(sqlUpvote, id, voter, time.Now().Unix()); err != nil {
-		return false, err
+	err = runTx()
+	if err != nil {
+		if rerr := tx.Rollback(); err != nil {
+			return false, fmt.Errorf("failed to rollback due to error (%v): %w", rerr, err)
+		}
+		return false, fmt.Errorf("failed to upvote: %w", err)
 	}
 
-	if err = tx.Commit(); err != nil {
-		return false, err
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit upvote: %w", err)
 	}
 
-	return true, nil
+	return !alreadyVoted, nil
 }
 
 // Downvote returns true iff the upvote was applied, if it was not applied
@@ -372,51 +387,59 @@ func (q *QuoteDB) Downvote(id int, voter string) (bool, error) {
 		return false, err
 	}
 
-	// If we have a -1 already, return false, nil
-	// If we have a +1, delete it, and add the -1
-	// If we have nothing, add the -1
-	var quoteExists int
-	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
-	if err != nil {
-		_ = tx.Rollback()
-		return false, err
-	}
-
-	if quoteExists == 0 {
-		_ = tx.Rollback()
-		return false, errors.New("Not a valid id")
-	}
-
-	var vote int
-	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
-	if err != nil && err != sql.ErrNoRows {
-		_ = tx.Rollback()
-		return false, nil
-	}
-
-	switch {
-	case vote < 0:
-		// Return false, we've already got the same type of vote here
-		_ = tx.Rollback()
-		return false, nil
-	case vote > 0:
-		// Delete old upvote
-		if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
-			_ = tx.Rollback()
-			return false, err
+	alreadyVoted := false
+	runTx := func() error {
+		// If we have a -1 already, return false, nil
+		// If we have a +1, delete it, and add the -1
+		// If we have nothing, add the -1
+		var quoteExists int
+		err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+		if err != nil {
+			return err
 		}
+
+		if quoteExists == 0 {
+			return errors.New("Not a valid id")
+		}
+
+		var vote int
+		err = tx.QueryRow(sqlHasVote, id, voter).Scan(&vote)
+		if err != nil && err != sql.ErrNoRows {
+			return err
+		}
+
+		switch {
+		case vote < 0:
+			// Return false, we've already got the same type of vote here
+			alreadyVoted = true
+			return nil
+		case vote > 0:
+			// Delete old upvote
+			if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+				return fmt.Errorf("failed to delete old upvote: %w", err)
+			}
+		}
+
+		if _, err = tx.Exec(sqlDownvote, id, voter, time.Now().Unix()); err != nil {
+			return fmt.Errorf("failed to exec downvote: %w", err)
+		}
+
+		return nil
 	}
 
-	if _, err = tx.Exec(sqlDownvote, id, voter, time.Now().Unix()); err != nil {
-		_ = tx.Rollback()
-		return false, err
+	err = runTx()
+	if err != nil {
+		if rerr := tx.Rollback(); err != nil {
+			return false, fmt.Errorf("failed to rollback due to error (%v): %w", rerr, err)
+		}
+		return false, fmt.Errorf("failed to downvote: %w", err)
 	}
 
-	if err = tx.Commit(); err != nil {
-		return false, err
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit downvote: %w", err)
 	}
 
-	return true, nil
+	return !alreadyVoted, nil
 }
 
 // Unvote returns true iff there was a vote that was removed, otherwise it
@@ -427,37 +450,47 @@ func (q *QuoteDB) Unvote(id int, voter string) (bool, error) {
 		return false, err
 	}
 
-	var quoteExists int
-	err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+	actuallyDeleted := false
+	runTx := func() error {
+		var quoteExists int
+		err = tx.QueryRow(sqlHasQuote, id).Scan(&quoteExists)
+		if err != nil {
+			return err
+		}
+
+		if quoteExists == 0 {
+			return errors.New("Not a valid id")
+		}
+
+		var throwaway int
+		err = tx.QueryRow(sqlHasVote, id, voter).Scan(&throwaway)
+		if err == sql.ErrNoRows {
+			return nil
+		} else if err != nil {
+			return err
+		}
+
+		if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
+			return err
+		}
+
+		actuallyDeleted = true
+		return nil
+	}
+
+	err = runTx()
 	if err != nil {
-		_ = tx.Rollback()
-		return false, err
+		if rerr := tx.Rollback(); err != nil {
+			return false, fmt.Errorf("failed to rollback due to error (%v): %w", rerr, err)
+		}
+		return false, fmt.Errorf("failed to delete vote: %w", err)
 	}
 
-	if quoteExists == 0 {
-		_ = tx.Rollback()
-		return false, errors.New("Not a valid id")
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit delete vote: %w", err)
 	}
 
-	var throwaway int
-	err = tx.QueryRow(sqlHasVote, id, voter).Scan(&throwaway)
-	if err == sql.ErrNoRows {
-		_ = tx.Rollback()
-		return false, nil
-	} else if err != nil {
-		_ = tx.Rollback()
-		return false, err
-	}
-
-	if _, err = tx.Exec(sqlUnvote, id, voter); err != nil {
-		return false, err
-	}
-
-	if err = tx.Commit(); err != nil {
-		return false, err
-	}
-
-	return true, nil
+	return actuallyDeleted, nil
 }
 
 // Votes retrieves the vote counts for a quote
@@ -465,7 +498,7 @@ func (q *QuoteDB) Votes(id int) (up, down int, err error) {
 	if err = q.db.QueryRow(sqlGetUpvotes, id).Scan(&up); err != nil {
 		return 0, 0, err
 	}
-	if err = q.db.QueryRow(sqlGetUpvotes, id).Scan(&down); err != nil {
+	if err = q.db.QueryRow(sqlGetDownvotes, id).Scan(&down); err != nil {
 		return 0, 0, err
 	}
 
