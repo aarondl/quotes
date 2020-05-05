@@ -42,6 +42,7 @@ const (
 	sqlGetCount = `SELECT COUNT(*) FROM quotes;`
 	sqlAdd      = `INSERT INTO quotes (date, author, quote) VALUES(?, ?, ?);`
 	sqlDel      = `DELETE FROM quotes WHERE id = ?;`
+	sqlDelVotes = `DELETE FROM votes WHERE quote_id = ?;`
 	sqlEdit     = `UPDATE quotes SET quote = ? WHERE id = ?;`
 
 	sqlHasQuote = `SELECT EXISTS(SELECT id FROM quotes WHERE id = ?);`
@@ -244,22 +245,51 @@ func (q *QuoteDB) GetQuote(id int) (quote Quote, err error) {
 
 // DelQuote deletes a quote by id.
 func (q *QuoteDB) DelQuote(id int) (bool, error) {
+	tx, err := q.db.BeginTx(context.Background(), &sql.TxOptions{ReadOnly: false})
+	if err != nil {
+		return false, err
+	}
+
 	var err error
 	var res sql.Result
-	var r int64
-	if res, err = q.db.Exec(sqlDel, id); err != nil {
-		return false, err
+
+	deleted := int64(0)
+	runTx := func() error {
+		if _, err = tx.Exec(sqlDelVotes, id); err != nil {
+			return fmt.Errorf("failed deleting quote votes: %w", err)
+		}
+
+		if res, err = tx.Exec(sqlDel, id); err != nil {
+			return fmt.Errorf("failed deleting quote: %w", err)
+		}
+
+		if deleted, err = res.RowsAffected(); err != nil {
+			return fmt.Errorf("failed getting rows affected: %w", err)
+		}
+
+		return nil
 	}
-	if r, err = res.RowsAffected(); err != nil {
-		return false, err
+
+	err = runTx()
+	if err != nil {
+		if rerr := tx.Rollback(); err != nil {
+			return false, fmt.Errorf("failed to rollback due to error (%v): %w", rerr, err)
+		}
+		return false, fmt.Errorf("failed to delquote: %w", err)
 	}
-	if r == 1 {
-		q.Lock()
-		defer q.Unlock()
-		q.nQuotes--
-		return true, nil
+
+	if err := tx.Commit(); err != nil {
+		return false, fmt.Errorf("failed to commit delquote: %w", err)
 	}
-	return false, nil
+
+	if deleted != 1 {
+		return false, nil
+	}
+
+	q.Lock()
+	q.nQuotes--
+	q.Unlock()
+	return true, nil
 }
 
 // EditQuote edits a quote by id.
