@@ -250,9 +250,7 @@ func (q *QuoteDB) DelQuote(id int) (bool, error) {
 		return false, err
 	}
 
-	var err error
 	var res sql.Result
-
 	deleted := int64(0)
 	runTx := func() error {
 		if _, err = tx.Exec(sqlDelVotes, id); err != nil {
