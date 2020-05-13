@@ -24,7 +24,7 @@ const (
 
 const (
 	sqlCreateTable = `CREATE TABLE IF NOT EXISTS quotes (` +
-		`id INTEGER PRIMARY KEY,` +
+		`id INTEGER PRIMARY KEY AUTOINCREMENT,` +
 		`date INTEGER NOT NULL,` +
 		`author TEXT NOT NULL,` +
 		`quote TEXT NOT NULL);`
